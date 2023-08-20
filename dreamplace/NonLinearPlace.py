@@ -16,6 +16,7 @@ import gzip
 import copy
 import matplotlib.pyplot as plt
 import inspect
+import json
 
 if sys.version_info[0] < 3:
     import cPickle as pickle
@@ -70,6 +71,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 # As global placement may easily diverge, we record the position of best overflow
                 best_metric = [None]
                 best_pos = [None]
+                #########
+                self.overflow_threshold = 0.8
+                self.overflow_threshold_delta = 0.05
+                #########
 
                 if params.gpu:
                     torch.cuda.synchronize()
@@ -299,7 +304,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         cur_metric.objective = obj.data.clone()
                     elif optimizer_name.lower() != "nesterov":
                         assert 0, "unsupported optimizer %s" % (optimizer_name)
-
+                    #########
+                    self.collect(iteration, pos, placedb, model, params, cur_metric)
+                    #########
                     # plot placement
                     if params.plot_flag and (iteration % 100 == 0 or iteration == 999):
                         cur_pos = self.pos[0].data.clone().cpu().numpy()
@@ -555,6 +562,28 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if Llambda_stop_criterion(Lgamma_step, Llambda_density_weight_step, Llambda_metrics):
                             break
 
+                        ##########
+                        # if params.__dict__["congestion predict epoch"] < 0:
+                        #     params.__dict__["congestion predict epoch"] = 100000
+                        #     model.op_collections.density_op.reset()
+                        #     model.op_collections.density_overflow_op.reset()
+                        #     model.initialize_density_weight(params, placedb)
+                        #     model.density_weight.mul_(0.1 / params.density_weight)
+                        #     logging.info("density_weight = %.6E" % (model.density_weight.data))
+                        #     # load state to restart the optimizer
+                        #     optimizer.load_state_dict(initial_state)
+                        #     # must after loading the state
+                        #     initialize_learning_rate(pos = model.data_collections.pos[0])
+                        #     # increase iterations of the sub problem to slow down the search
+                        #     model.Lsub_iteration = model.routability_Lsub_iteration
+
+                        #     # reset best metric
+                        #     best_metric[0] = None
+                        #     best_pos[0] = None
+
+                        #     break
+                        ##########
+
                         # for routability optimization
                         if (
                             params.routability_opt_flag
@@ -576,9 +605,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             pin_utilization_map = None
                             if adjust_route_area_flag:
                                 if params.adjust_nctugr_area_flag:
-                                    route_utilization_map = model.op_collections.nctugr_congestion_map_op(pos)
+                                    route_utilization_map,_,_,_ = model.op_collections.nctugr_congestion_map_op(pos)
                                 else:
-                                    route_utilization_map = model.op_collections.route_utilization_map_op(pos)
+                                    route_utilization_map,_,_,_,_,_,_ = model.op_collections.route_utilization_map_op(pos)
                                 if params.plot_flag:
                                     path = "%s/%s" % (params.result_dir, params.design_name())
                                     figname = "%s/plot/route%d.png" % (path, num_area_adjust)
@@ -751,4 +780,83 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # plot placement
         if params.plot_flag:
             self.plot(params, placedb, iteration, cur_pos)
+        
+        #########
+        self.collect(iteration, pos, placedb, model, params, cur_metric,finish=True)
+        self.congestion_time = model.total_congestion_time
+        self.ncgr = model.build_nctugr_congestion_map(params, placedb, model.data_collections)
+        self.grpos = model.data_collections.pos[0]
+        #########
         return all_metrics
+
+    def savesomearrays(self, commonprefix, listofarrays, listofnames):
+        """
+        Helper function to save NumPy data.
+
+        Args:
+            listofarrays (list): A list of arrays to be saved.
+            listofnames (list): A list of names of files to be saved.
+            commonprefix (str): The common prefix of all files to be saved.
+
+        Returns:
+            None
+        """
+        [np.save(commonprefix + listofnames[i] + '.npy', listofarrays[i]) for i in range(len(listofarrays))]
+        return
+    
+    def savefixarrays(self, commonprefix_src, commonprefix_dst, listofarrays, listofnames):
+        for i in range(len(listofarrays)):
+            if not os.path.exists(commonprefix_src + listofnames[i] + '.npy'):
+                np.save(commonprefix_src + listofnames[i] + '.npy', listofarrays[i])
+            os.system(f"ln -s {commonprefix_src + listofnames[i] + '.npy'} {commonprefix_dst}")
+
+    def collect(self, iteration, pos, placedb, model, params, cur_metric, finish=False):
+        if ('collect' not in params.__dict__):
+            return
+        if (float(model.overflow) > self.overflow_threshold) and (not finish):
+            return
+        SAVE_DIR = "./collect"
+        savedir = os.path.join(SAVE_DIR,params.design_name(),str(iteration))
+        common_dir = os.path.join(SAVE_DIR,params.design_name(),"common")
+        os.system(f"mkdir -p {savedir}")
+        os.system(f"mkdir -p {common_dir}")
+
+        self.overflow_threshold -= self.overflow_threshold_delta
+
+        if params.adjust_nctugr_area_flag:
+            _,h,v,c = model.op_collections.nctugr_congestion_map_op(pos)
+            h_m,_ = h.max(dim=2)
+            v_m,_ = v.max(dim=2)
+            route_utilization_map = torch.max(h_m,v_m)
+        else:
+            _,h,v,hc,vc, hdm, vdm  = model.op_collections.route_utilization_map_op(pos)
+            route_utilization_map = torch.max(h,v)
+        _,hmapfake, vmapfake, hc, vc, hdm, vdm = model.op_collections.route_utilization_map_op(pos)
+        listofnames = ['cmap_h', 'cmap_v', 'bad_cmap_h', 'bad_cmap_v', 'hori_cap', 'verti_cap', 'nctu_cap']
+        listofarrays =[h.data.cpu().numpy(), v.data.cpu().numpy(), hmapfake.data.cpu().numpy(), vmapfake.data.cpu().numpy(), hc, vc, c.data.cpu().numpy()]
+        self.savesomearrays(savedir+'/iter_'+str(iteration)+'_', listofarrays[:-3],listofnames[:-3])
+        # self.savesomearrays(savedir+'/iter_'+'fix'+'_', listofarrays[-3:], listofnames[-3:])
+        self.savefixarrays(str(common_dir)+'/iter_'+'fix'+'_', savedir, listofarrays[-3:],listofnames[-3:])
+
+        pos = pos.data.cpu().numpy()
+        unscale_factor = 1.0/params.scale_factor
+        node_x = placedb.node_x * unscale_factor
+        node_y = placedb.node_y * unscale_factor
+        x_pos = pos[0:placedb.num_movable_nodes] * unscale_factor
+        y_pos = pos[placedb.num_nodes:placedb.num_nodes + placedb.num_movable_nodes] * unscale_factor
+        listofnames = ['sizes_x', 'sizes_y', 'po_x', 'po_y', 'pd' , 'pin2node', 'pin2edge', 'mapper', 'x', 'y', 'pos']
+        listofarrays = [np.asarray(placedb.node_size_x), np.asarray(placedb.node_size_y), np.asarray(placedb.pin_offset_x),
+        np.asarray(placedb.pin_offset_y), np.asarray(placedb.pin_direct), np.asarray(placedb.pin2node_map), np.asarray(placedb.pin2net_map), 
+        np.asarray(placedb.node2orig_node_map), x_pos, y_pos, pos]
+        # self.savesomearrays(savedir+'/iter_'+'fix'+'_', listofarrays[:-3], listofnames[:-3])
+        self.savefixarrays(str(common_dir)+'/iter_'+'fix'+'_', savedir, listofarrays[:-3],listofnames[:-3])
+        self.savesomearrays(savedir+'/iter_'+str(iteration)+'_', listofarrays[-3:], listofnames[-3:])
+        np.save(savedir+'/hdm.npy',hdm.data.cpu().numpy())
+        np.save(savedir+'/vdm.npy',vdm.data.cpu().numpy())
+
+        with open(savedir+'/overflow.json',"w") as f:
+            json.dump(float(np.round(model.overflow.data.cpu().numpy(),4)),f)
+        
+        with open(savedir+"/%.4f.json"%(float(np.round(model.overflow.data.cpu().numpy(),4))),"w") as f:
+            json.dump(float(np.round(model.overflow.data.cpu().numpy(),4)),f)
+

@@ -72,10 +72,24 @@ class NCTUgr(object):
                                       self.placedb.num_routing_grids_y,
                                       self.placedb.num_routing_layers),
                                      dtype=pos.dtype)
+        
+        self.wirelength = 0
+        self.total_overflow = 0
+        self.max_overflow = 0
+        self.num_via = 0
         with open(self.tmp_output_file + ".ofinfo", "r") as f:
             status = 0
             for line in f:
                 line = line.strip()
+                if line.startswith("Total wirelength"):
+                    self.wirelength=int(line.split("=")[-1])
+                if line.startswith("Total overflow"):
+                    self.total_overflow=int(line.split("=")[-1])
+                if line.startswith("Max overflow"):
+                    self.max_overflow=int(line.split("=")[-1])
+                if line.startswith("Via count"):
+                    self.num_via=int(line.split("=")[-1])
+
                 if line.startswith("Overflowed grid edges :"):
                     status = 1
                 elif line.startswith("end") and status:
@@ -97,11 +111,11 @@ class NCTUgr(object):
 
         if self.routing_capacities.device != pos.device:
             self.routing_capacities = self.routing_capacities.to(pos.device)
-        overflow_map = congestion_map.to(
+        self.overflow_map = congestion_map.to(
             pos.device) / (self.routing_capacities + 1e-6) + 1
         #horizontal_overflow_map = overflow_map[:, :, 0:self.placedb.num_routing_layers:2].mean(dim=2)
         #vertical_overflow_map = overflow_map[:, :, 1:self.placedb.num_routing_layers:2].mean(dim=2)
         #ret = torch.max(horizontal_overflow_map, vertical_overflow_map)
-        ret = overflow_map.max(dim=2)[0]
+        ret = self.overflow_map.max(dim=2)[0]
 
-        return ret
+        return ret,self.overflow_map[:, :, 1:self.placedb.num_routing_layers:2],self.overflow_map[:, :, 1:self.placedb.num_routing_layers:2],self.routing_capacities
