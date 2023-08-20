@@ -67,3 +67,40 @@ for netlist_name in netlist_names:
     placer = NonLinearPlace.NonLinearPlace(params, placedb, timer)
 
     metrics = placer(params, placedb)
+
+    SAVE_DIR = "./collect"
+    common_dir = os.path.join(SAVE_DIR,params.design_name(),"common")
+    with open(os.path.join(common_dir,"route_info.json"),"w") as f:
+        xl=placedb.routing_grid_xl
+        yl=placedb.routing_grid_yl
+        xh=placedb.routing_grid_xh
+        yh=placedb.routing_grid_yh
+        num_bins_x=placedb.num_routing_grids_x
+        num_bins_y=placedb.num_routing_grids_y
+        bin_size_x = (xh - xl) / num_bins_x
+        bin_size_y = (yh - yl) / num_bins_y
+        json.dump({"xl":xl,
+                    "yl":yl,
+                    "xh":xh,
+                    "yh":yh,
+                    "num_bins_x":num_bins_x,
+                    "num_bins_y":num_bins_y,
+                    "bin_size_x":bin_size_x,
+                    "bin_size_y":bin_size_y,},f)
+    with open(os.path.join(common_dir,"layout_info.json"),"w") as f:
+        xl=placedb.xl
+        yl=placedb.yl
+        xh=placedb.xh
+        yh=placedb.yh
+        num_bins_x=placedb.num_bins_x
+        num_bins_y=placedb.num_bins_y
+        bin_size_x = placedb.bin_size_x
+        bin_size_y = placedb.bin_size_y
+        json.dump({"xl":xl,
+                    "yl":yl,
+                    "xh":xh,
+                    "yh":yh,
+                    "num_bins_x":num_bins_x,
+                    "num_bins_y":num_bins_y,
+                    "bin_size_x":bin_size_x,
+                    "bin_size_y":bin_size_y,},f)
